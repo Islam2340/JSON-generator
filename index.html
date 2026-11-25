@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JSON‑генератор</title>
+<style>
+:root{--bg:#f6f0e4;--card:#fffaf0;--tx:#2b1a17;--ac:#6b1d2a;--gold:#b8923a;--mu:#7a6a60;--ok:#2e7d32;--bad:#b3261e;--bd:#e0d4bc}
+@media (prefers-color-scheme:dark){:root{--bg:#1a1214;--card:#261a1d;--tx:#f1e6d8;--ac:#c4566a;--gold:#d4af5a;--mu:#a89a90;--ok:#6fcf74;--bad:#ff8a80;--bd:#3d2c30}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,sans-serif;padding:max(14px,env(safe-area-inset-top)) 14px max(90px,env(safe-area-inset-bottom))}
+h1{font-size:20px;margin:6px 0 2px;color:var(--ac)}
+.hint{color:var(--mu);font-size:14px;margin:0 0 12px}
+.btn{display:block;width:100%;padding:14px;margin:8px 0;border:0;border-radius:12px;background:var(--ac);color:#fff;font-size:16px;text-align:center;cursor:pointer}
+.btn.alt{background:transparent;color:var(--ac);border:2px solid var(--ac)}
+.btn.sm{display:inline-block;width:auto;padding:8px 12px;margin:4px 6px 0 0;font-size:14px}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:10px;margin:10px 0}
+.top{display:flex;gap:8px}
+input[type=text],input[type=number],textarea{width:100%;padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx);font-size:16px}
+input.num{width:72px;flex:none}
+.x{flex:none;width:44px;border:0;border-radius:8px;background:transparent;color:var(--bad);font-size:20px}
+.chip{display:inline-block;font-size:13px;padding:3px 8px;border-radius:99px;border:1px solid var(--bd);margin:6px 6px 0 0}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+details{margin-top:8px}summary{color:var(--ac);padding:6px 0}
+textarea{min-height:160px}
+label.opt{display:flex;gap:10px;align-items:center;margin:12px 0}
+label.opt input{width:22px;height:22px}
+pre{white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--card);padding:10px;border-radius:8px;max-height:300px;overflow:auto}
+#st{margin:10px 0;font-weight:600;color:var(--gold)}
+.bar{position:fixed;left:0;right:0;bottom:0;padding:10px 14px max(10px,env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--bd)}
+</style>
+</head>
+<body>
+<h1>JSON‑генератор</h1>
+<p class="hint">Загрузите аудио и текст сур — программа создаст JSON‑файлы. Можно сразу много файлов.</p>
+
+<div class="row2">
+  <label class="btn alt">🎧 Аудио (много)<input id="aud" type="file" accept="audio/*" multiple hidden></label>
+  <label class="btn alt">📄 Тексты .txt (много)<input id="txt" type="file" accept=".txt,text/plain" multiple hidden></label>
+</div>
+<button class="btn alt" id="add">➕ Добавить суру вручную</button>
+<p class="hint">Файлы объединяются в одну суру по номеру в названии: <b>001.mp3</b> + <b>001.txt</b>. Название суры можно взять из имени файла: <b>001 Аль-Фатиха.mp3</b>.</p>
+
+<label class="opt"><input type="checkbox" id="strip"> Убрать номера аятов в начале строк (1. 2) 3: …)</label>
+
+<div id="list"></div>
+
+<details id="pvbox"><summary>Пример результата</summary><pre id="pv"></pre></details>
+<div id="st"></div>
+
+<div class="bar">
+  <div class="row2">
+    <button class="btn" id="sepb">💾 Каждая сура — файл</button>
+    <button class="btn alt" id="allb">📦 Всё одним файлом</button>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+let rows=[];
+const pad=n=>String(n).padStart(3,'0');
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const nextNum=()=>rows.length?Math.max(...rows.map(r=>r.num))+1:1;
+const numOf=(name,fb)=>{const m=name.match(/\d+/);return m?parseInt(m[0],10):fb};
+const titleOf=n=>n.replace(/\.[^.]+$/,'').replace(/^[\d\s._\-–()]+/,'').replace(/_+/g,' ').trim();
+function getRow(num){let r=rows.find(x=>x.num===num);if(!r){r={num,title:'',audio:'',duration:0,text:''};rows.push(r)}return r}
+const dur=f=>new Promise(res=>{
+  const a=new Audio(),u=URL.createObjectURL(f);
+  const done=v=>{URL.revokeObjectURL(u);res(v)};
+  a.preload='metadata';
+  a.onloadedmetadata=()=>done(isFinite(a.duration)?Math.round(a.duration*100)/100:0);
+  a.onerror=()=>done(0);
+  setTimeout(()=>done(0),8000);
+  a.src=u;
+});
+const countAyahs=t=>lines(t).length;
+function lines(t){
+  let l=t.replace(/^\uFEFF/,'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  if($('#strip').checked)l=l.map(s=>s.replace(/^[\(\[]?\d+[\)\]\.:\-–]*\s*/,'')).filter(Boolean);
+  return l;
+}
+function build(r){
+  return{number:r.num,title:r.title||('Сура '+r.num),audio:r.audio,duration:r.duration,
+    ayahs:lines(r.text).map((t,i)=>({number:i+1,text:t}))};
+}
+function render(){
+  rows.sort((a,b)=>a.num-b.num);
+  $('#list').innerHTML=rows.map((r,i)=>`
+  <div class="card">
+    <div class="top">
+      <input class="num" type="number" inputmode="numeric" data-i="${i}" data-k="num" value="${r.num}">
+      <input type="text" data-i="${i}" data-k="title" placeholder="Название суры" value="${esc(r.title)}">
+      <button class="x" data-del="${i}">✕</button>
+    </div>
+    <span class="chip ${r.audio?'ok':'bad'}">${r.audio?'🎧 '+esc(r.audio)+(r.duration?' · '+Math.round(r.duration)+' с':''):'нет аудио'}</span>
+    <span class="chip ${r.text?'ok':'bad'} cnt">${r.text?'📄 аятов: '+countAyahs(r.text):'нет текста'}</span>
+    <label class="btn alt sm">🎧 Аудио<input type="file" accept="audio/*" hidden data-aud="${i}"></label>
+    <details><summary>Текст (можно вставить или поправить)</summary>
+      <textarea data-i="${i}" data-k="text" placeholder="Каждый аят — с новой строки">${esc(r.text)}</textarea>
+    </details>
+  </div>`).join('')||'<p class="hint">Пока пусто. Выберите файлы выше.</p>';
+}
+$('#list').addEventListener('input',e=>{
+  const t=e.target,i=t.dataset.i,k=t.dataset.k;
+  if(i===undefined||!k)return;
+  rows[i][k]=k==='num'?(parseInt(t.value,10)||0):t.value;
+  if(k==='text'){
+    const c=t.closest('.card').querySelector('.cnt');
+    c.textContent=t.value?'📄 аятов: '+countAyahs(t.value):'нет текста';
+    c.className='chip cnt '+(t.value?'ok':'bad');
+  }
+});
+$('#list').addEventListener('change',async e=>{
+  const t=e.target;
+  if(t.dataset.k==='num'){render();return}
+  if(t.dataset.aud!==undefined&&t.files[0]){
+    const r=rows[t.dataset.aud],f=t.files[0];
+    r.audio=f.name;r.duration=await dur(f);
+    if(!r.title)r.title=titleOf(f.name);
+    render();
+  }
+});
+$('#list').addEventListener('click',e=>{
+  const d=e.target.dataset.del;
+  if(d!==undefined&&confirm('Удалить эту суру из списка?')){rows.splice(d,1);render()}
+});
+$('#aud').onchange=async e=>{
+  $('#st').textContent='Читаю аудио…';
+  for(const f of e.target.files){
+    const r=getRow(numOf(f.name,nextNum()));
+    r.audio=f.name;r.duration=await dur(f);
+    if(!r.title)r.title=titleOf(f.name);
+  }
+  e.target.value='';$('#st').textContent='';render();
+};
+$('#txt').onchange=async e=>{
+  for(const f of e.target.files){
+    const r=getRow(numOf(f.name,nextNum()));
+    r.text=(await f.text()).replace(/^\uFEFF/,'');
+    if(!r.title)r.title=titleOf(f.name);
+  }
+  e.target.value='';render();
+};
+$('#add').onclick=()=>{getRow(nextNum());render()};
+$('#strip').onchange=render;
+$('#pvbox').addEventListener('toggle',()=>{
+  if(!$('#pvbox').open)return;
+  $('#pv').textContent=rows.length?JSON.stringify(build(rows[0]),null,2).slice(0,1500)+'\n…':'Сначала добавьте суры.';
+});
+
+async function save(files){
+  const C=window.Capacitor;
+  if(C&&C.isNativePlatform&&C.isNativePlatform()){
+    const FS=C.Plugins.Filesystem,Sh=C.Plugins.Share,uris=[];
+    for(const f of files){
+      const r=await FS.writeFile({path:'json/'+f.name,data:f.content,directory:'CACHE',encoding:'utf8',recursive:true});
+      uris.push(r.uri);
+    }
+    await Sh.share({title:'JSON‑файлы',files:uris});
+  }else{
+    for(const f of files){
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob([f.content],{type:'application/json'}));
+      a.download=f.name;a.click();await sleep(300);
+    }
+  }
+}
+function check(){
+  if(!rows.length){alert('Список пуст. Добавьте аудио и тексты.');return false}
+  const bad=rows.filter(r=>!r.audio||!r.text).length;
+  return !bad||confirm('У сур без аудио или текста: '+bad+'. Всё равно сохранить?');
+}
+async function run(kind){
+  if(!check())return;
+  rows.sort((a,b)=>a.num-b.num);
+  try{
+    const list=rows.map(build);
+    const files=kind==='sep'
+      ?list.map(s=>({name:pad(s.number)+'.json',content:JSON.stringify(s,null,2)}))
+      :[{name:'quran.json',content:JSON.stringify({suras:list},null,2)}];
+    $('#st').textContent='Готовлю файлы…';
+    await save(files);
+    $('#st').textContent='Готово: файлов — '+files.length;
+  }catch(err){$('#st').textContent='Ошибка: '+(err&&err.message||err)}
+}
+$('#sepb').onclick=()=>run('sep');
+$('#allb').onclick=()=>run('all');
+render();
+</script>
+</body>
+</html>
