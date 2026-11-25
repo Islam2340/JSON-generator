@@ -130,8 +130,58 @@ $('#txt').onchange=async e=>{
 $('#add').onclick=()=>{getRow(nextNum());render()};
 $('#bism').onchange=render;
 
-// Ищем паузы в аудио и берём N-1 самых длинных как границы между частями
-async function analyze(file,N){
+// Длина текста каждой части: по ней программа понимает, где примерно должны быть границы
+function weightsFor(r,N){
+  const L=r.text.replace(/^\uFEFF/,'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean).map(x=>x.length);
+  const b=($('#bism').checked&&r.num!==1&&r.num!==9)?[40]:[];
+  const w=b.concat(L);
+  return w.length===N?w:null;
+}
+function choose(gaps,t0,t1,w){
+  const N=w.length,M=gaps.length;
+  if(N<=1)return{idx:[],bad:0};
+  if(M<N-1)return{idx:gaps.map((_,i)=>i),bad:1,few:true};
+  const tot=w.reduce((x,y)=>x+y,0);
+  const rate=Math.max(t1-t0-(N-1)*0.45,1)/tot;
+  const K=40,INF=1e18,LAM=4;
+  const z=(dur,k)=>{const ex=rate*w[k];const s=0.2*ex+0.4;return((dur-ex)/s)**2};
+  const rew=g=>-LAM*Math.min(g.d,0.8);
+  const dp=[],bk=[];
+  for(let k=0;k<N-1;k++){dp.push(new Float64Array(M).fill(INF));bk.push(new Int32Array(M).fill(-1))}
+  for(let j=0;j<M;j++)dp[0][j]=z(gaps[j].a-t0,0)+rew(gaps[j]);
+  for(let k=1;k<N-1;k++){
+    for(let j=k;j<M;j++){
+      let best=INF,bi=-1;
+      for(let i=Math.max(k-1,j-K);i<j;i++){
+        if(dp[k-1][i]>=INF)continue;
+        const c=dp[k-1][i]+z(gaps[j].a-gaps[i].b,k);
+        if(c<best){best=c;bi=i}
+      }
+      if(bi>=0){dp[k][j]=best+rew(gaps[j]);bk[k][j]=bi}
+    }
+  }
+  let best=INF,bj=-1;
+  for(let j=N-2;j<M;j++){
+    if(dp[N-2][j]>=INF)continue;
+    const c=dp[N-2][j]+z(t1-gaps[j].b,N-1);
+    if(c<best){best=c;bj=j}
+  }
+  const idx=new Array(N-1);
+  for(let k=N-2,j=bj;k>=0;k--){idx[k]=j;j=bk[k][j]}
+  // confidence: number of segments far from expected
+  let bad=0,st=t0;
+  for(let k=0;k<N;k++){
+    const en=k<N-1?gaps[idx[k]].a:t1;
+    const ex=rate*w[k],s=0.2*ex+0.4;
+    if(Math.abs(en-st-ex)/s>2.5)bad++;
+    if(k<N-1)st=gaps[idx[k]].b;
+  }
+  return{idx,bad};
+}
+
+// Ищем паузы в аудио. Границы выбираются так, чтобы и пауза была заметной,
+// и длина каждого отрезка подходила под длину его текста
+async function analyze(file,N,w){
   const buf=await file.arrayBuffer();
   const ctx=new OfflineAudioContext(1,1,8000);
   const ab=await ctx.decodeAudioData(buf);
@@ -142,8 +192,8 @@ async function analyze(file,N){
     for(const c of ch){for(let j=i*W,m=j+W;j<m;j++)s+=c[j]*c[j]}
     e[i]=Math.sqrt(s/(W*ch.length));
   }
-  const sorted=Float32Array.from(e).sort();
-  const thr=Math.max(sorted[Math.floor(n*0.95)]*0.05,0.001);
+  const p95=Float32Array.from(e).sort()[Math.floor(n*0.95)];
+  const thr=Math.max(p95*0.05,0.001);
   const T=ab.duration,end=n*0.01;
   const gaps=[];let st=-1;
   for(let i=0;i<=n;i++){
@@ -151,17 +201,27 @@ async function analyze(file,N){
     if(q&&st<0)st=i;
     else if(!q&&st>=0){gaps.push({a:st*0.01,b:i*0.01,d:(i-st)*0.01});st=-1}
   }
-  let trail=null;
+  let lead=null,trail=null;
+  if(gaps.length&&gaps[0].a<0.001)lead=gaps.shift();
   const last=gaps[gaps.length-1];
   if(last&&last.b>=end-0.005){trail=last;gaps.pop()}
-  const inner=gaps.filter(g=>g.a>0.001&&g.d>=0.12).sort((x,y)=>y.d-x.d);
-  const pick=inner.slice(0,Math.max(N-1,0)).sort((x,y)=>x.a-y.a);
-  let warn='';
-  if(N>1&&inner.length<N-1)warn='найдено пауз: '+inner.length+' из '+(N-1);
-  else if(N>1&&inner.length>N-1&&inner[N-1].d>inner[N-2].d*0.8)warn='границы неуверенные — проверьте';
+  const inner=gaps.filter(g=>g.d>=0.12);
+  const t0=lead?lead.b:0,P1=trail?trail.a:T;
+  let pick,warn='';
+  if(N<=1)pick=[];
+  else if(w&&w.length===N){
+    const r=choose(inner,t0,P1,w);
+    pick=r.idx.map(i=>inner[i]);
+    if(r.few)warn='найдено пауз: '+inner.length+' из '+(N-1);
+    else if(r.bad>0)warn='границ под сомнением: '+r.bad+' — проверьте';
+  }else{
+    pick=[...inner].sort((x,y)=>y.d-x.d).slice(0,N-1).sort((x,y)=>x.a-y.a);
+    warn=inner.length<N-1?'найдено пауз: '+inner.length+' из '+(N-1):'нет текста — границы по длине пауз, проверьте';
+  }
   const t=[];let start=0;
   for(const g of pick){t.push([start,g.a]);start=g.b}
-  t.push([start,trail?trail.a:T]);
+  t.push([start,P1]);
+  if(!warn&&t.some(p=>p[1]-p[0]<0.8))warn='есть очень короткие отрезки — проверьте';
   const r2=x=>Math.round(x*100)/100;
   return{t:t.map(p=>[r2(p[0]),r2(p[1])]),warn};
 }
@@ -196,7 +256,7 @@ $('#go').onclick=async()=>{
     if(!r.file){r.status='нет аудио';r.cls='bad';continue}
     if(!N){r.status='нет текста';r.cls='bad';continue}
     try{
-      const a=await analyze(r.file,N);
+      const a=await analyze(r.file,N,weightsFor(r,N));
       files.push({name:'s'+pad(r.num)+'.json',content:JSON.stringify({v:1,t:a.t})});
       r.status=a.warn?('⚠ '+a.warn):'✓ готово';
       r.cls=a.warn?'wr':'ok';
